@@ -1,5 +1,7 @@
 # Back-in-stock alerts
 
+[![CI](https://github.com/Binhpham151412/back-in-stock-alerts/actions/workflows/ci.yml/badge.svg)](https://github.com/Binhpham151412/back-in-stock-alerts/actions/workflows/ci.yml)
+
 Customers leave their email on a sold-out product. When it really comes back, they get one email. Not zero, not two.
 
 - **`GET /embed`** is an embeddable form (email + SKU) built to live in an iframe on any store. Use `?sku=` to lock it to one product. It shows a live product preview and resizes its iframe with `postMessage`.
@@ -68,6 +70,8 @@ waiting ──(stock API confirms quantity > 0)──▶ queued ──▶ sendin
 7. **A missed webhook still gets delivered.** A reconciler re-checks the stock API every `RECONCILE_SECONDS` for SKUs that still have people waiting. Sign-ups also check stock straight away: if the item is already in stock, the customer is told on screen and gets the email at once, rather than waiting for a webhook that may never come.
 
 ## Tests
+
+Both run on every push in GitHub Actions ([ci.yml](.github/workflows/ci.yml)). The `docker` job builds the image, runs it with only the brief's env vars, checks the endpoints, and checks the data survives `docker restart` and re-creating the container on the same volume ([test/docker-smoke.sh](test/docker-smoke.sh)).
 
 `test/e2e.js` runs the app against the challenge's own test server, started locally, and checks:
 
