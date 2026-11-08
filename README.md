@@ -71,7 +71,7 @@ waiting ──(stock API confirms quantity > 0)──▶ queued ──▶ sendin
 
 ## Tests
 
-Both run on every push in GitHub Actions ([ci.yml](.github/workflows/ci.yml)). The `docker` job builds the image, runs it with only the brief's env vars, checks the endpoints, and checks the data survives `docker restart` and re-creating the container on the same volume ([test/docker-smoke.sh](test/docker-smoke.sh)).
+Two jobs run on every push in GitHub Actions ([ci.yml](.github/workflows/ci.yml)): `e2e` (described below) and `docker`. The `docker` job builds the image, runs it with only the brief's env vars, checks the endpoints, and checks the data survives `docker restart` and re-creating the container on the same volume ([test/docker-smoke.sh](test/docker-smoke.sh)).
 
 `test/e2e.js` runs the app against the challenge's own test server, started locally, and checks:
 
