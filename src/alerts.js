@@ -34,8 +34,7 @@ const q = {
   freeze: db.prepare(`UPDATE requests SET email_idem_key = ?, email_body = ?, email_frozen_at = ? WHERE id = ? AND email_body IS NULL`),
   queueSku: db.prepare(`UPDATE requests SET status = 'queued', queued_at = ?, next_attempt_at = ?, trigger = ?
     WHERE sku = ? AND status = 'waiting'`),
-  queueOne: db.prepare(`UPDATE requests SET status = 'queued', queued_at = ?, next_attempt_at = ?, trigger = ?
-    WHERE id = ? AND status = 'waiting'`),
+  closeInStock: db.prepare(`UPDATE requests SET status = 'in_stock', trigger = ? WHERE id = ? AND status = 'waiting'`),
   due: db.prepare(`SELECT id FROM requests WHERE status = 'queued' AND next_attempt_at <= ? ORDER BY id LIMIT 50`),
   claim: db.prepare(`UPDATE requests SET status = 'sending', attempts = attempts + 1 WHERE id = ? AND status = 'queued'`),
   markSent: db.prepare(`UPDATE requests SET status = 'notified', notified_at = ?, email_id = ?, last_error = NULL WHERE id = ? AND status = 'sending'`),
@@ -78,15 +77,16 @@ async function createRequest(body) {
   }
   const id = Number(ins.lastInsertRowid);
 
-  // If it's already in stock, tell them now instead of waiting for a webhook that may never
-  // come. This also closes the race with a restock webhook processed a moment earlier.
+  // If it's in stock right now there's nothing to wait for: say so on screen and close the
+  // request without an email. (Emailing here would let someone who submits the form twice
+  // while the item is in stock get two emails.) Checking after the insert also covers a
+  // restock webhook processed a moment before this sign-up.
   let result = 'waiting';
   try {
     const p = await stock.checkStock(sku);
     rememberProduct(p);
-    if (p.inStock) {
-      const t = now();
-      if (Number(q.queueOne.run(t, t, 'in stock at sign-up', id).changes)) { result = 'in_stock'; kick(); }
+    if (p.inStock && Number(q.closeInStock.run('in stock at sign-up: shown on screen, no email needed', id).changes)) {
+      result = 'in_stock';
     }
   } catch (e) {
     console.warn(`[request] stock check failed for ${sku}, the reconciler will retry: ${e.message}`);

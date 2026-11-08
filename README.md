@@ -7,7 +7,7 @@ Customers leave their email on a sold-out product. When it really comes back, th
 **Live:** https://back-in-stock-alerts-nr1t.onrender.com (demo product page). Also see [`/embed`](https://back-in-stock-alerts-nr1t.onrender.com/embed) and [`/admin`](https://back-in-stock-alerts-nr1t.onrender.com/admin) (password on request). It runs on Render's free plan from [`render.yaml`](render.yaml), so the first request after a quiet spell can take ~30s to wake up, and the free disk is not persistent across redeploys. Restart survival is verified in CI with a Docker volume.
 
 - **`GET /embed`** is an embeddable form (email + SKU) built to live in an iframe on any store. Use `?sku=` to lock it to one product. It shows a live product preview and resizes its iframe with `postMessage`.
-- **`POST /api/requests`** takes `{ "email", "sku" }` as JSON. It returns `201` for a new request and `200 { result: "already_waiting" }` when one is already open. CORS is enabled.
+- **`POST /api/requests`** takes `{ "email", "sku" }` as JSON. It returns `201` with `result: "waiting"` for a new request, `201` with `result: "in_stock"` when the item is available right now (no email is needed), and `200` with `result: "already_waiting"` when one is already open. CORS is enabled.
 - **`POST /webhooks/stock`** receives stock webhooks. It checks `X-Webhook-Secret`, verifies every restock against the stock API, and ignores duplicate deliveries.
 - **`GET /admin`** is behind a password (sign-in page, or HTTP Basic for scripts). It lists every request with its status, when it was requested and when it was notified, plus the recent webhooks and what happened to each one. `GET /admin/requests.json` returns the same data.
 - **The email** is responsive HTML with a plain-text part, sent in the Resend API format (`POST {RESEND_BASE_URL}/emails`).
@@ -69,7 +69,7 @@ waiting ──(stock API confirms quantity > 0)──▶ queued ──▶ sendin
 4. **Each request can only be claimed once.** Every state change is a guarded `UPDATE ... WHERE status = '<expected>'`. Webhooks, retries and the reconciler can all race, and a request still moves `waiting → queued` once and `queued → sending` once.
 5. **The email is frozen before it is first sent, and every retry resends the same bytes.** Before the first network call, the exact request is stored on the row: `Idempotency-Key: restock-alert-<request id>-<random uuid>` plus the JSON body (from, to, subject, html, text). Every retry, including after a restart, sends that stored key and body unchanged. Later product updates or config changes (`EMAIL_FROM`, `BRAND_NAME`, …) don't touch a frozen payload, so one key is never paired with two different payloads. The random part keeps keys unique even when a fresh database (a new deploy) starts counting request ids from 1 again; without it, the provider would treat the new email as a repeat of an old one and drop it. A 5xx, timeout or dropped connection is retried with exponential backoff (3s, 6s, 12s, … capped at 10 min, up to `MAX_EMAIL_ATTEMPTS`). If an attempt was accepted but the response was lost, the provider recognises the repeated key and doesn't send again.
 6. **Restarts are survived.** The queue and the frozen payloads live in SQLite. On boot, any request left in `sending` goes back to `queued`, and the worker resends its frozen payload. Older databases are migrated in place, with new columns added on start-up.
-7. **A missed webhook still gets delivered.** A reconciler re-checks the stock API every `RECONCILE_SECONDS` for SKUs that still have people waiting. Sign-ups also check stock straight away: if the item is already in stock, the customer is told on screen and gets the email at once, rather than waiting for a webhook that may never come.
+7. **A missed webhook still gets delivered.** A reconciler re-checks the stock API every `RECONCILE_SECONDS` for SKUs that still have people waiting. Sign-ups also check stock straight away. If the item is already in stock, the customer is told on screen and the request is closed as `in_stock` without an email. That way, someone who submits the form twice while the item is available doesn't get two emails, and a restock processed a moment before the sign-up isn't missed.
 
 ### What this guarantees, and what it doesn't
 
@@ -89,7 +89,7 @@ Two jobs run on every push in GitHub Actions ([ci.yml](.github/workflows/ci.yml)
 - a phantom restock sends no email
 - the same webhook delivered twice at once sends exactly one email per customer
 - two injected HTTP 500s are retried and the customer gets exactly one email
-- signing up while the item is in stock sends one email
+- signing up while the item is in stock, even four times in a row, sends no email: the customer is told on screen
 - a sell-out webhook sends nothing
 - killing the app with a send pending, then restarting it, delivers exactly one email
 - `/admin` requires the password

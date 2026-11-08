@@ -17,7 +17,7 @@ input,button,select{font:inherit}
 .pill::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .p-waiting{background:var(--warn-soft);color:var(--warn)}.p-queued,.p-sending{background:var(--blue-soft);color:var(--blue)}
 .p-notified,.p-confirmed{background:var(--soft);color:var(--brand-2)}.p-failed,.p-phantom{background:var(--bad-soft);color:var(--bad)}
-.p-sellout,.p-unverified,.p-processing{background:#f0efea;color:var(--muted)}
+.p-sellout,.p-unverified,.p-processing,.p-in_stock{background:#f0efea;color:var(--muted)}
 .muted{color:var(--muted)}
 `;
 
@@ -100,7 +100,7 @@ h1{font-size:20px;line-height:1.25;margin:0 0 6px;letter-spacing:-.01em}
       $('pmeta').textContent = [money(p.price, p.currency), p.in_stock ? 'In stock right now' : 'Sold out'].filter(Boolean).join(' · ');
       $('title').textContent = p.in_stock ? 'Good news: it\\'s in stock.' : 'Sold out, for now.';
       $('sub').textContent = p.in_stock
-        ? 'It\\'s available right now. Leave your email and we\\'ll send you the details, just once.'
+        ? 'It\\'s available right now, so there\\'s nothing to wait for.'
         : 'Leave your email and we\\'ll send you one message the moment it\\'s back. No spam, no newsletter.';
       $('product').classList.add('show');
     } catch {}
@@ -128,7 +128,7 @@ h1{font-size:20px;line-height:1.25;margin:0 0 6px;letter-spacing:-.01em}
       const copy = {
         waiting: ["You're on the list", 'We\\'ll email ' + email + ' as soon as ' + name + ' is back. Just once, and only for this item.'],
         already_waiting: ["You're already on the list", email + ' is already waiting for ' + name + '. We\\'ll send one email when it\\'s back.'],
-        in_stock: ['Good news: it\\'s in stock', name + ' is available right now. We\\'ve sent the details to ' + email + '.'],
+        in_stock: ['Good news: it\\'s in stock', name + ' is available right now, so there\\'s nothing to wait for. Grab it before it goes.'],
       }[d.result] || ["You're on the list", ''];
       $('doneTitle').textContent = copy[0]; $('doneText').textContent = copy[1];
       $('card').classList.add('is-done');
@@ -229,7 +229,7 @@ function adminLogin({ error } = {}) {
 </form>`, { css });
 }
 
-const STATUS_LABEL = { waiting: 'Waiting', queued: 'Queued', sending: 'Sending', notified: 'Notified', failed: 'Failed' };
+const STATUS_LABEL = { waiting: 'Waiting', queued: 'Queued', sending: 'Sending', notified: 'Notified', failed: 'Failed', in_stock: 'In stock at sign-up' };
 const EVENT_LABEL = { confirmed: 'Restock confirmed', phantom: 'Not confirmed', sellout: 'Sold out', unverified: 'Unverified', processing: 'Processing' };
 
 function adminPage({ stats, requests, total, events, filter, search }) {

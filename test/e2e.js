@@ -160,12 +160,15 @@ const sentTo = (addr) => proxy.sent.filter((s) => JSON.parse(s.body).to.includes
     assert.equal(r.status, 'notified'); assert.equal(r.attempts, 3);
   });
 
-  await check('signing up for an item that is in stock -> told now, one email', async () => {
-    const r = await request('dan@example.com', 'TEST-A');
-    assert.equal((await r.json()).result, 'in_stock');
-    await waitFor(async () => accepted(await emailsTo('dan@example.com')).length === 1);
-    await sleep(800);
-    assert.equal(accepted(await emailsTo('dan@example.com')).length, 1);
+  await check('signing up while in stock -> told on screen, no email, even when repeated', async () => {
+    for (let i = 0; i < 4; i++) {
+      const r = await request('dan@example.com', 'TEST-A');
+      assert.equal(r.status, 201); assert.equal((await r.json()).result, 'in_stock');
+    }
+    await sleep(2500);
+    assert.equal((await emailsTo('dan@example.com')).length, 0);
+    const rows = (await adminJson()).requests.filter((x) => x.email === 'dan@example.com');
+    assert.ok(rows.length && rows.every((x) => x.status === 'in_stock'));
   });
 
   await check('sell-out webhook (quantity 0) is acknowledged, no emails', async () => {
@@ -295,9 +298,13 @@ const sentTo = (addr) => proxy.sent.filter((s) => JSON.parse(s.body).to.includes
     const F = 'http://localhost:4350';
     const p = start(path.join(__dirname, '..', 'src', 'server.js'), { ...appEnv, PORT: 4350, DATA_DIR: path.join(tmp, 'fresh-db') }, 'fresh');
     await waitUp(F);
-    const r = await post(`${F}/api/requests`, { email: 'zed@example.com', sku: 'TEST-A' });
+    await setStock('TEST-G', 0);
+    const r = await post(`${F}/api/requests`, { email: 'zed@example.com', sku: 'TEST-G' });
     const out = await r.json();
-    assert.equal(out.request.id, 1); assert.equal(out.result, 'in_stock');
+    assert.equal(out.request.id, 1); assert.equal(out.result, 'waiting');
+    await setStock('TEST-G', 3);
+    const hook = await post(`${F}/webhooks/stock`, { event_id: 'evt_fresh_db', sku: 'TEST-G', quantity: 3 }, { 'x-webhook-secret': cand.webhookSecret });
+    assert.equal((await hook.json()).outcome, 'confirmed');
     const ok = await waitFor(async () => (await emailsTo('zed@example.com')).length >= 1);
     p.kill();
     assert.ok(ok, 'zed never got an email');
