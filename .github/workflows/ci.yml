@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: End-to-end tests (Node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Fetch the challenge test server
+        run: git clone --depth 1 https://github.com/yitzi-farla/back-in-stock-challenge "$RUNNER_TEMP/challenge"
+      - name: Run e2e
+        run: node test/e2e.js
+        env:
+          HARNESS: ${{ runner.temp }}/challenge/harness/server.js
+
+  docker:
+    name: Docker build + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Fetch the challenge test server
+        run: git clone --depth 1 https://github.com/yitzi-farla/back-in-stock-challenge "$RUNNER_TEMP/challenge"
+      - name: Build, run, restart, re-create on the same volume
+        run: bash test/docker-smoke.sh
+        env:
+          HARNESS: ${{ runner.temp }}/challenge/harness/server.js
