@@ -1,6 +1,7 @@
 'use strict';
 // The back-in-stock email (table layout + inline styles so it renders in real mail clients)
 // and the Resend-format sender.
+const crypto = require('node:crypto');
 const config = require('./config');
 const { esc, money } = require('./util');
 
@@ -76,10 +77,13 @@ function renderEmail(r) {
 // Builds the exact request for one alert: the Idempotency-Key and the JSON body string.
 // The caller stores both before the first network call and reuses them byte-for-byte on
 // every retry and after restarts, so one key is only ever paired with one payload.
+// The key includes a random part: request ids restart at 1 in a fresh database (e.g. a new
+// deploy), and the provider remembers keys, so `restock-alert-<id>` alone could collide with
+// an email sent earlier and be silently dropped as a duplicate.
 function buildOutbound(r) {
   const { subject, html, text } = renderEmail(r);
   return {
-    key: `restock-alert-${r.id}`,
+    key: `restock-alert-${r.id}-${crypto.randomUUID()}`,
     body: JSON.stringify({ from: config.emailFrom, to: [r.email], subject, html, text }),
   };
 }

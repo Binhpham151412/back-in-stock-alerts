@@ -290,6 +290,20 @@ const sentTo = (addr) => proxy.sent.filter((s) => JSON.parse(s.body).to.includes
     assert.equal(d.requests[0].email, 'old@example.com');
     assert.ok(['email_idem_key', 'email_body', 'email_frozen_at'].every((c) => c in d.requests[0]));
   });
+  await check('a fresh database (e.g. a redeploy) never reuses an earlier idempotency key', async () => {
+    // Request ids restart at 1 in a new database; the earlier app already emailed request #1.
+    const F = 'http://localhost:4350';
+    const p = start(path.join(__dirname, '..', 'src', 'server.js'), { ...appEnv, PORT: 4350, DATA_DIR: path.join(tmp, 'fresh-db') }, 'fresh');
+    await waitUp(F);
+    const r = await post(`${F}/api/requests`, { email: 'zed@example.com', sku: 'TEST-A' });
+    const out = await r.json();
+    assert.equal(out.request.id, 1); assert.equal(out.result, 'in_stock');
+    const ok = await waitFor(async () => (await emailsTo('zed@example.com')).length >= 1);
+    p.kill();
+    assert.ok(ok, 'zed never got an email');
+    const inbox = await emailsTo('zed@example.com');
+    assert.equal(accepted(inbox).length, 1, `expected an accepted email, got: ${inbox.map((e) => e.status).join(', ')}`);
+  });
   proxyServer.close();
 
   console.log(`\nAll ${passed} checks passed.`);
