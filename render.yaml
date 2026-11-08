@@ -1,0 +1,22 @@
+# Render Blueprint: one-click deploy of the Dockerfile on Render's free plan.
+# Secrets are not stored here; Render asks for them when the Blueprint is applied.
+services:
+  - type: web
+    name: back-in-stock-alerts
+    runtime: docker
+    plan: free
+    region: oregon
+    healthCheckPath: /healthz
+    envVars:
+      - key: STOCK_API_URL
+        value: https://harness-production-e601.up.railway.app/api/stock
+      - key: RESEND_BASE_URL
+        value: https://harness-production-e601.up.railway.app
+      - key: STOCK_API_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: ADMIN_PASSWORD
+        generateValue: true
