@@ -51,7 +51,7 @@ node --env-file=.env --disable-warning=ExperimentalWarning src/server.js
 | `RECONCILE_SECONDS` | no | How often to re-check stock for SKUs with people waiting (default `300`) |
 | `MAX_EMAIL_ATTEMPTS` | no | Send attempts before a request is marked `failed` (default `10`) |
 
-## How customers get exactly one email
+## How customers get one email, not zero and not two
 
 Each request moves through these states:
 
@@ -65,9 +65,15 @@ waiting ──(stock API confirms quantity > 0)──▶ queued ──▶ sendin
 2. **Webhooks are not trusted.** The secret is compared in constant time. The webhook's `quantity` is treated only as a hint. Nobody is emailed until `GET STOCK_API_URL/{sku}` confirms the item is in stock. A webhook that claims a restock the stock API doesn't confirm is recorded as *not confirmed* and sends nothing.
 3. **Duplicate and concurrent deliveries are recognised.** The `event_id` is written to `webhook_events` (primary key) before the handler awaits anything. A second delivery arriving at the same moment therefore sees the row and is acknowledged with `200 { duplicate: true }`, with no side effects. If the stock API can't be reached, the event is marked `unverified`, the handler returns `503`, and a redelivery of that event is processed again.
 4. **Each request can only be claimed once.** Every state change is a guarded `UPDATE ... WHERE status = '<expected>'`. Webhooks, retries and the reconciler can all race, and a request still moves `waiting → queued` once and `queued → sending` once.
-5. **Failed sends are retried, but never duplicated.** Every send carries `Idempotency-Key: restock-alert-<request id>`. A 5xx or timeout is retried with exponential backoff (3s, 6s, 12s, … capped at 10 min). If an attempt actually succeeded but we never saw the response, the retry is deduplicated by the email provider.
-6. **Restarts are survived.** The queue lives in SQLite. On boot, any request left in `sending` goes back to `queued` (safe because of the idempotency key), and the worker resumes.
+5. **The email is frozen before it is first sent, and every retry resends the same bytes.** Before the first network call, the exact request is stored on the row: `Idempotency-Key: restock-alert-<request id>` plus the JSON body (from, to, subject, html, text). Every retry, including after a restart, sends that stored key and body unchanged. Later product updates or config changes (`EMAIL_FROM`, `BRAND_NAME`, …) don't touch a frozen payload, so one key is never paired with two different payloads. A 5xx, timeout or dropped connection is retried with exponential backoff (3s, 6s, 12s, … capped at 10 min, up to `MAX_EMAIL_ATTEMPTS`). If an attempt was accepted but the response was lost, the provider recognises the repeated key and doesn't send again.
+6. **Restarts are survived.** The queue and the frozen payloads live in SQLite. On boot, any request left in `sending` goes back to `queued`, and the worker resends its frozen payload. Older databases are migrated in place, with new columns added on start-up.
 7. **A missed webhook still gets delivered.** A reconciler re-checks the stock API every `RECONCILE_SECONDS` for SKUs that still have people waiting. Sign-ups also check stock straight away: if the item is already in stock, the customer is told on screen and gets the email at once, rather than waiting for a webhook that may never come.
+
+### What this guarantees, and what it doesn't
+
+- **At most one email per request** holds as long as the email provider honours `Idempotency-Key` for longer than our retry window. The test server does. Resend keeps keys for 24 hours, and retries here stop well within that unless `MAX_EMAIL_ATTEMPTS` is raised a lot. A provider that ignores the header could deliver twice if a response is lost.
+- **At least one email** holds while the stock API eventually confirms the restock and the email API eventually accepts the send within `MAX_EMAIL_ATTEMPTS`. After that, the request is marked `failed`, with the last error shown in `/admin`. It is not silently dropped.
+- What happens after the provider accepts the email (spam filters, bounces) is outside this app.
 
 ## Tests
 
@@ -86,6 +92,9 @@ Two jobs run on every push in GitHub Actions ([ci.yml](.github/workflows/ci.yml)
 - killing the app with a send pending, then restarting it, delivers exactly one email
 - `/admin` requires the password
 - `/embed` can be framed
+- the email is accepted but the response is lost: the retry reuses the same key and the identical body, and the inbox gets one email (the repeat shows as deduplicated)
+- the app is killed while waiting for the email API, and the product details and sender/brand config change while it is down: after restart it resends the identical frozen key and body, and the inbox gets one email
+- a database created by the previous version is migrated in place
 
 ```bash
 git clone https://github.com/yitzi-farla/back-in-stock-challenge ../_ref/back-in-stock-challenge

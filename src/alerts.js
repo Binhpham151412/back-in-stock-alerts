@@ -1,22 +1,23 @@
 'use strict';
 // Core logic: sign-ups, webhook handling, the durable email queue and the reconciler.
 //
-// Exactly-once delivery, in short:
+// One email per request, in short (see the README for the exact guarantee and its limits):
 //  - A request moves waiting -> queued -> sending -> notified with guarded UPDATEs
 //    (`WHERE status = 'waiting'` etc.), so it can be claimed once no matter how many
 //    webhooks, retries or reconcile passes try at the same time.
 //  - Nothing is queued until the stock API confirms quantity > 0 (webhooks can lie).
 //  - Webhook event_ids are recorded before any await, so a duplicate delivery that
 //    arrives at the same moment is recognised and acknowledged without side effects.
-//  - The email queue is in SQLite, so a restart resumes it. Every send carries an
-//    Idempotency-Key tied to the request id, so resending after a crash or timeout
-//    cannot produce a second email.
+//  - The email queue is in SQLite, so a restart resumes it. Before the first send, the
+//    exact request (Idempotency-Key + JSON body) is stored; every retry, including after a
+//    restart, resends those same bytes, so the provider can deduplicate a send whose
+//    response was lost. Later product or config changes don't touch a frozen payload.
 //  - Failed sends are retried with backoff; a periodic reconcile pass re-checks stock for
 //    SKUs that still have people waiting, in case a webhook never arrived.
 const config = require('./config');
 const { db } = require('./db');
 const stock = require('./stock');
-const { sendAlert } = require('./email');
+const { buildOutbound, sendFrozen } = require('./email');
 const { now, normEmail, normSku, validEmail, validSku, validUrl } = require('./util');
 
 const OPEN = "('waiting','queued','sending')";
@@ -27,7 +28,10 @@ const q = {
   openRequest: db.prepare(`SELECT * FROM requests WHERE email = ? AND sku = ? AND status IN ${OPEN}`),
   getRequest: db.prepare('SELECT * FROM requests WHERE id = ?'),
   setProduct: db.prepare(`UPDATE requests SET product_name = COALESCE(?, product_name), product_image = COALESCE(?, product_image),
-    product_price = COALESCE(?, product_price), product_currency = COALESCE(?, product_currency) WHERE sku = ? AND status IN ${OPEN}`),
+    product_price = COALESCE(?, product_price), product_currency = COALESCE(?, product_currency)
+    WHERE sku = ? AND status IN ('waiting','queued') AND email_body IS NULL`),
+  // Freeze the exact request once, before the first network call. Never overwritten.
+  freeze: db.prepare(`UPDATE requests SET email_idem_key = ?, email_body = ?, email_frozen_at = ? WHERE id = ? AND email_body IS NULL`),
   queueSku: db.prepare(`UPDATE requests SET status = 'queued', queued_at = ?, next_attempt_at = ?, trigger = ?
     WHERE sku = ? AND status = 'waiting'`),
   queueOne: db.prepare(`UPDATE requests SET status = 'queued', queued_at = ?, next_attempt_at = ?, trigger = ?
@@ -160,8 +164,13 @@ async function processQueue() {
     if (!due.length) return;
     for (const { id } of due) {
       if (!Number(q.claim.run(id).changes)) continue;
-      const r = q.getRequest.get(id);
-      const res = await sendAlert(r);
+      let r = q.getRequest.get(id);
+      if (!r.email_body) {
+        const out = buildOutbound(r);
+        q.freeze.run(out.key, out.body, now(), id);
+        r = q.getRequest.get(id);
+      }
+      const res = await sendFrozen({ key: r.email_idem_key, body: r.email_body });
       if (res.ok) {
         q.markSent.run(now(), res.id, id);
         console.log(`[queue] notified ${r.email} about ${r.sku} (request ${id})`);

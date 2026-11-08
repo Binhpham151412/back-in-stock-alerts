@@ -46,10 +46,38 @@ const admin = { authorization: 'Basic ' + Buffer.from('admin:test-admin-pw').toS
 const adminJson = () => fetch(`${A}/admin/requests.json`, { headers: admin }).then((r) => r.json());
 async function waitFor(fn, ms = 20000) { const t = Date.now(); for (;;) { const v = await fn(); if (v) return v; if (Date.now() - t > ms) return v; await sleep(300); } }
 
-async function startApp() {
-  appProc = start(path.join(__dirname, '..', 'src', 'server.js'), appEnv, 'app');
+async function startApp(extraEnv = {}) {
+  appProc = start(path.join(__dirname, '..', 'src', 'server.js'), { ...appEnv, ...extraEnv }, 'app');
   await waitUp(A);
 }
+async function stopApp() {
+  const exited = new Promise((r) => appProc.once('exit', r));
+  appProc.kill('SIGKILL');
+  await exited;
+}
+
+// A proxy in front of the test server, so tests can lose the email API's response after the
+// email was accepted. mode: 'pass' | 'drop' (accept upstream, then cut the connection)
+// | 'hold' (accept upstream, never answer).
+const P_PORT = 4330, P = `http://localhost:${P_PORT}`;
+const proxy = { mode: 'pass', sent: [], held: [] };
+const proxyServer = require('node:http').createServer(async (req, res) => {
+  const chunks = []; for await (const c of req) chunks.push(c);
+  const body = Buffer.concat(chunks).toString('utf8');
+  const headers = {};
+  for (const h of ['authorization', 'content-type', 'idempotency-key']) if (req.headers[h]) headers[h] = req.headers[h];
+  const up = await fetch(H + req.url, { method: req.method, headers, body: req.method === 'GET' ? undefined : body });
+  const upBody = await up.text();
+  if (req.url.startsWith('/emails')) {
+    proxy.sent.push({ key: req.headers['idempotency-key'], body, upstream: up.status });
+    if (proxy.mode === 'drop') { req.socket.destroy(); return; }
+    if (proxy.mode === 'hold') { proxy.held.push(res); return; }
+  }
+  res.writeHead(up.status, { 'content-type': up.headers.get('content-type') || 'application/json' });
+  res.end(upBody);
+});
+const viaProxy = { STOCK_API_URL: `${P}/api/stock`, RESEND_BASE_URL: P };
+const sentTo = (addr) => proxy.sent.filter((s) => JSON.parse(s.body).to.includes(addr));
 
 (async () => {
   start(HARNESS, { PORT: H_PORT, DATA_DIR: hData, SIM_INTERVAL_SECONDS: '100000', INVITE_CODE: '' }, 'harness');
@@ -189,6 +217,80 @@ async function startApp() {
     assert.match(mail.html, /viewport/); assert.ok(mail.text.length > 0); assert.match(mail.subject, /back/i);
     assert.ok(mail.idempotencyKey);
   });
+
+  // ---- lost responses: the email API accepted the email but the app never heard back ----
+  await new Promise((r) => proxyServer.listen(P_PORT, r));
+  await stopApp();
+  await startApp(viaProxy);
+
+  await check('email accepted but response lost -> retry reuses key + payload, one email', async () => {
+    await setStock('TEST-F', 0);
+    await request('hana@example.com', 'TEST-F');
+    proxy.mode = 'drop';
+    await testApi('restock', { sku: 'TEST-F', quantity: 2, twice: false });
+    await waitFor(() => sentTo('hana@example.com').length >= 1);
+    proxy.mode = 'pass';
+    const ok = await waitFor(async () => (await adminJson()).requests.find((x) => x.email === 'hana@example.com').status === 'notified', 20000);
+    assert.ok(ok, 'hana was never marked notified');
+    const sends = sentTo('hana@example.com');
+    assert.equal(sends.length, 2, 'expected the original send and one retry');
+    assert.equal(sends[0].key, sends[1].key); assert.equal(sends[0].body, sends[1].body);
+    const inbox = await emailsTo('hana@example.com');
+    assert.equal(accepted(inbox).length, 1);
+    assert.equal(inbox.filter((e) => e.status.startsWith('deduped')).length, 1);
+  });
+
+  await check('crash before markSent + product/config changed while down -> same key + payload, one email', async () => {
+    await setStock('TEST-E', 0);
+    await request('gina@example.com', 'TEST-E');
+    proxy.mode = 'hold';
+    await testApi('restock', { sku: 'TEST-E', quantity: 2, twice: false });
+    await waitFor(async () => accepted(await emailsTo('gina@example.com')).length === 1);
+    await stopApp(); // dies while still waiting for the email API's response
+    proxy.held.splice(0).forEach((res) => res.destroy());
+    proxy.mode = 'pass';
+
+    // While it's down: the request is mid-send with its payload already frozen; the product
+    // details change, and the app comes back with a different sender and brand.
+    const { DatabaseSync } = require('node:sqlite');
+    const sdb = new DatabaseSync(path.join(aData, 'restock.db'));
+    const row = sdb.prepare("SELECT * FROM requests WHERE email = 'gina@example.com'").get();
+    assert.equal(row.status, 'sending'); assert.ok(row.email_body && row.email_idem_key, 'payload frozen before the first send');
+    sdb.prepare("UPDATE requests SET product_name = 'Renamed While Down', product_price = 999 WHERE id = ?").run(row.id);
+    sdb.close();
+    await startApp({ ...viaProxy, BRAND_NAME: 'Rebranded', EMAIL_FROM: 'Changed <changed@example.com>' });
+
+    const ok = await waitFor(async () => (await adminJson()).requests.find((x) => x.email === 'gina@example.com').status === 'notified', 20000);
+    assert.ok(ok, 'gina was never marked notified after restart');
+    const sends = sentTo('gina@example.com');
+    assert.equal(sends.length, 2, 'expected the original send and one resend after restart');
+    assert.equal(sends[0].key, sends[1].key); assert.equal(sends[0].body, sends[1].body);
+    assert.doesNotMatch(sends[1].body, /Renamed While Down|Rebranded|changed@example/);
+    const inbox = await emailsTo('gina@example.com');
+    assert.equal(accepted(inbox).length, 1);
+    assert.equal(inbox.filter((e) => e.status.startsWith('deduped')).length, 1);
+  });
+
+  await check('a database from the previous version is migrated in place', async () => {
+    const oldDir = path.join(tmp, 'old-db');
+    fs.mkdirSync(oldDir);
+    const { DatabaseSync } = require('node:sqlite');
+    const odb = new DatabaseSync(path.join(oldDir, 'restock.db'));
+    odb.exec(`CREATE TABLE requests (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, sku TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'waiting', product_name TEXT, product_image TEXT, product_price REAL, product_currency TEXT,
+      page_url TEXT, created_at TEXT NOT NULL, queued_at TEXT, notified_at TEXT, trigger TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT, last_error TEXT, email_id TEXT);
+      INSERT INTO requests (email, sku, created_at) VALUES ('old@example.com', 'TEST-OLD', '2026-01-01T00:00:00.000Z');`);
+    odb.close();
+    const M = 'http://localhost:4340';
+    const p = start(path.join(__dirname, '..', 'src', 'server.js'), { ...appEnv, PORT: 4340, DATA_DIR: oldDir }, 'migrate');
+    await waitUp(M);
+    const d = await fetch(`${M}/admin/requests.json`, { headers: admin }).then((r) => r.json());
+    p.kill();
+    assert.equal(d.requests[0].email, 'old@example.com');
+    assert.ok(['email_idem_key', 'email_body', 'email_frozen_at'].every((c) => c in d.requests[0]));
+  });
+  proxyServer.close();
 
   console.log(`\nAll ${passed} checks passed.`);
 })().catch((e) => { console.error('\nFAILED:', e); process.exitCode = 1; })

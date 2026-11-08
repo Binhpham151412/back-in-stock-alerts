@@ -33,7 +33,11 @@ CREATE TABLE IF NOT EXISTS requests (
   attempts        INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TEXT,
   last_error      TEXT,
-  email_id        TEXT
+  email_id        TEXT,
+  -- The exact email request (key + JSON body), frozen before the first send attempt.
+  email_idem_key  TEXT,
+  email_body      TEXT,
+  email_frozen_at TEXT
 );
 -- The rule "no duplicate open requests" is enforced by the database, not by app code.
 CREATE UNIQUE INDEX IF NOT EXISTS requests_one_open
@@ -56,6 +60,12 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 );
 CREATE INDEX IF NOT EXISTS webhook_events_received ON webhook_events(received_at);
 `);
+
+// Additive migrations for databases created by earlier versions.
+const requestCols = new Set(db.prepare('PRAGMA table_info(requests)').all().map((c) => c.name));
+for (const [col, type] of [['email_idem_key', 'TEXT'], ['email_body', 'TEXT'], ['email_frozen_at', 'TEXT']]) {
+  if (!requestCols.has(col)) db.exec(`ALTER TABLE requests ADD COLUMN ${col} ${type}`);
+}
 
 function tx(fn) {
   db.exec('BEGIN IMMEDIATE');

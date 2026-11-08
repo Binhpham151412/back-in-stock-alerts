@@ -73,10 +73,19 @@ function renderEmail(r) {
   return { subject, html, text };
 }
 
-// Sends one alert. The Idempotency-Key is derived from the request id, so a retry after a
-// timeout or a crash can never produce a second email for the same request.
-async function sendAlert(r) {
+// Builds the exact request for one alert: the Idempotency-Key and the JSON body string.
+// The caller stores both before the first network call and reuses them byte-for-byte on
+// every retry and after restarts, so one key is only ever paired with one payload.
+function buildOutbound(r) {
   const { subject, html, text } = renderEmail(r);
+  return {
+    key: `restock-alert-${r.id}`,
+    body: JSON.stringify({ from: config.emailFrom, to: [r.email], subject, html, text }),
+  };
+}
+
+// Sends a previously frozen request ({ key, body }) in the Resend API format.
+async function sendFrozen({ key, body: payload }) {
   let res;
   try {
     res = await fetch(`${config.resendBaseUrl}/emails`, {
@@ -84,9 +93,9 @@ async function sendAlert(r) {
       headers: {
         authorization: `Bearer ${config.resendApiKey}`,
         'content-type': 'application/json',
-        'idempotency-key': `restock-alert-${r.id}`,
+        'idempotency-key': key,
       },
-      body: JSON.stringify({ from: config.emailFrom, to: [r.email], subject, html, text }),
+      body: payload,
       signal: AbortSignal.timeout(10_000),
     });
   } catch (e) {
@@ -98,4 +107,4 @@ async function sendAlert(r) {
   return { ok: false, status: res.status, error: `HTTP ${res.status}${body && body.message ? `: ${body.message}` : ''}` };
 }
 
-module.exports = { renderEmail, sendAlert };
+module.exports = { renderEmail, buildOutbound, sendFrozen };
